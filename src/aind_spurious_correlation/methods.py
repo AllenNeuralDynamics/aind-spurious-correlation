@@ -8,6 +8,8 @@ from statsmodels.tsa.stattools import adfuller, kpss
 from statsmodels.tsa.api import ARDL
 from scipy.fftpack import rfft, irfft
 
+from typing import Union, List, Tuple, Dict, Optional
+
 
 def simple_LR(
     fr_ts, 
@@ -408,93 +410,427 @@ def cyclic_shift(
 ### PARAMETRIC ERROR CORRECTION MODELS ###
 
 def ARMA_model(
-    fr_ts, 
-    behavior_ts, 
-    behavior_name, 
-    AR_p=3, 
-    MA_q=0
-):
-   """
-   Fits an ARIMA (Autoregressive Integrated Moving Average) model to analyze the 
-   relationship between neural firing rates and behavioral variables while accounting 
-   for temporal autocorrelation.
-   
-   This function fits an ARIMA(p,0,q) model (equivalent to ARMA) where the firing rate 
-   is the endogenous variable and behavior is the exogenous regressor. The model accounts 
-   for temporal dependencies in the firing rate time series.
-   
-   Parameters
-   ----------
-   fr_ts : array-like
-       Time series of neural firing rates (endogenous variable)
-   behavior_ts : array-like
-       Time series of behavioral variable (exogenous regressor)
-   behavior_name : str
-       Name of the behavioral variable being analyzed
-   AR_p : int, optional (default=3)
-       Order of the autoregressive component (number of AR lags)
-   MA_q : int, optional (default=0)
-       Order of the moving average component (number of MA lags)
-       
-   Returns
-   -------
-   statsmodels.tsa.arima.model.ARIMAResults
-       Fitted ARIMA model results containing:
-       - Model coefficients (AR, MA, and behavioral regression parameters)
-       - Standard errors
-       - Information criteria (AIC, BIC)
-       - Model diagnostics
-       - Residual analysis tools
-       
-   Notes
-   -----
-   The model specification:
-   - Uses ARIMA(p,0,q) which is equivalent to ARMA(p,q)
-   - Includes exogenous behavioral regressor
-   - Default AR(3) specification based on common neural time series properties
-   
-   Assumptions:
-   - Time series is approximately stationary
-   - Temporal dependencies are captured by specified AR and MA orders
-   - Residuals should be approximately white noise
-   
-   Examples
-   --------
-   >>> fr = np.array([1.2, 3.4, 2.1, 4.5, 3.2, 2.8])
-   >>> behavior = np.array([0.1, 0.3, 0.2, 0.4, 0.3, 0.2])
-   >>> results = ARMA_model(fr, behavior, 'speed', AR_p=2, MA_q=1)
-   >>> print(results.summary())
-   
-   See Also
-   --------
-   statsmodels.tsa.arima.model.ARIMA : Underlying ARIMA model implementation
-   """
+    fr_ts: Union[List[float], np.ndarray, pd.Series],
+    behavior_ts: Union[List[Union[List[float], np.ndarray, pd.Series]], 
+                       Dict[str, Union[List[float], np.ndarray, pd.Series]]],
+    behavior_names: Optional[Union[str, List[str]]] = None,
+    ar_order: int = 3,
+    ma_order: int = 0,
+    trend: str = 'ct'
+) -> object:
 
-   df_var_endo = pd.DataFrame({'fr': fr_ts})
-   df_var_exog = pd.DataFrame({behavior_name: behavior_ts})
-   X = df_var_exog
-   armar_order = (AR_p, 0, MA_q)
-   model_ARMA = sm.tsa.arima.ARIMA(df_var_endo, exog=X, order=armar_order)
-   results_ARMA = model_ARMA.fit()
-   
-   return results_ARMA
+    """
+    Fit an ARMA (Autoregressive Moving Average) model to analyze the relationship 
+    between neural firing rates and one or more behavioral variables while accounting 
+    for temporal autocorrelation.
+    
+    This function fits an ARIMA(p,0,q) model (equivalent to ARMA) where the firing rate 
+    is the endogenous variable and behaviors are exogenous regressors. The model accounts 
+    for temporal dependencies in the firing rate time series.
+    
+    Parameters
+    ----------
+    fr_ts : array-like
+        Time series of neural firing rates (endogenous variable).
+        Can be a list, numpy array, or pandas Series.
+    
+    behavior_ts : array-like or dict
+        Time series of exogenous variable(s). Can be:
+        - Single array-like for one behavior
+        - List of array-likes for multiple behaviors
+        - Dict mapping behavior names to array-likes
+    
+    behavior_names : str, list of str, or None, optional
+        Names of behavioral variables. Required if behavior_ts is a list.
+        If behavior_ts is a dict, this parameter is ignored.
+        If single behavior and str, uses that name.
+        If None and single behavior, defaults to 'behavior'.
+    
+    ar_order : int, default=3
+        Order of the autoregressive component (number of AR lags).
+        Common neural time series often show autocorrelation up to 3 lags.
+    
+    ma_order : int, default=0
+        Order of the moving average component (number of MA lags).
+        Set to 0 for pure AR model, which is often sufficient for neural data.
+    
+    trend : str, default='ct'
+        The trend to include in the model:
+        - 'n' or 'nc': No deterministic trend
+        - 'c': Constant only
+        - 't': Linear time trend only
+        - 'ct': Constant and linear time trend
+    
+    Returns
+    -------
+    results : ARIMAResults
+        Fitted ARIMA model results containing:
+        - Model coefficients (AR, MA, and behavioral regression parameters)
+        - Standard errors and confidence intervals
+        - Information criteria (AIC, BIC, HQIC)
+        - Model diagnostics and residual analysis tools
+    
+    Raises
+    ------
+    ValueError
+        If input time series are empty or have incompatible lengths.
+        If behavior_names not provided when behavior_ts is a list.
+        If number of behavior names doesn't match number of behavior time series.
+        If time series is too short for the specified model order.
+    
+    Notes
+    -----
+    Model Specification:
+    The ARMA(p,q) model with exogenous variables is:
+    y_t = c + δt + Σ(φ_i * y_{t-i}) + Σ(θ_j * ε_{t-j}) + β'X_t + ε_t
+    
+    where:
+    - y_t is the firing rate at time t
+    - c is the constant term
+    - δ is the time trend coefficient
+    - φ_i are AR coefficients
+    - θ_j are MA coefficients
+    - β are regression coefficients for exogenous behaviors
+    - X_t are exogenous behavioral variables
+    - ε_t is white noise
+    
+    The function automatically aligns all time series to the shortest length.
+    
+    Model Selection Guidelines:
+    - AR order: Start with 1-5 lags, use AIC/BIC for selection
+    - MA order: Often 0-2 is sufficient for neural data
+    - Check residual diagnostics to validate model adequacy
+    
+    Examples
+    --------
+    >>> import numpy as np
+    >>> # Generate sample data
+    >>> np.random.seed(42)
+    >>> fr_data = np.cumsum(np.random.randn(100)) + 50
+    >>> velocity_data = np.cumsum(np.random.randn(100)) + 10
+    >>> acceleration_data = np.diff(np.concatenate([[0], velocity_data]))
+    >>> 
+    >>> # Example 1: Single behavior
+    >>> results = fit_arma_model(
+    ...     fr_data, 
+    ...     velocity_data, 
+    ...     'velocity',
+    ...     ar_order=2,
+    ...     ma_order=1
+    ... )
+    >>> 
+    >>> # Example 2: Multiple behaviors with list
+    >>> results = fit_arma_model(
+    ...     fr_data,
+    ...     [velocity_data, acceleration_data],
+    ...     ['velocity', 'acceleration'],
+    ...     ar_order=3
+    ... )
+    >>> 
+    >>> # Example 3: Multiple behaviors with dict
+    >>> results = fit_arma_model(
+    ...     fr_data,
+    ...     {'velocity': velocity_data, 'acceleration': acceleration_data},
+    ...     ar_order=2,
+    ...     ma_order=1
+    ... )
+    >>> 
+    >>> # Print summary and check diagnostics
+    >>> print(results.summary())
+    >>> print(f"AIC: {results.aic:.2f}, BIC: {results.bic:.2f}")
+    
+    See Also
+    --------
+    statsmodels.tsa.arima.model.ARIMA : Underlying ARIMA model implementation
+    """
+    
+    # Input validation
+    if len(fr_ts) == 0:
+        raise ValueError("Firing rate time series cannot be empty")
+    
+    # Convert fr_ts to numpy array
+    fr_ts = np.asarray(fr_ts)
+    
+    # Handle different behavior_ts input formats
+    behavior_dict = {}
+    
+    if isinstance(behavior_ts, dict):
+        # Already in dict format
+        behavior_dict = {k: np.asarray(v) for k, v in behavior_ts.items()}
+        
+    elif isinstance(behavior_ts, list) and len(behavior_ts) > 0:
+        # Check if it's a list of time series or a single time series
+        if isinstance(behavior_ts[0], (list, np.ndarray, pd.Series)):
+            # List of multiple behaviors
+            if behavior_names is None:
+                raise ValueError("behavior_names must be provided when behavior_ts is a list of arrays")
+            
+            if isinstance(behavior_names, str):
+                behavior_names = [behavior_names]
+                
+            if len(behavior_names) != len(behavior_ts):
+                raise ValueError(f"Number of behavior names ({len(behavior_names)}) must match "
+                               f"number of behavior time series ({len(behavior_ts)})")
+            
+            for name, ts in zip(behavior_names, behavior_ts):
+                behavior_dict[name] = np.asarray(ts)
+        else:
+            # Single time series as list
+            name = behavior_names if isinstance(behavior_names, str) else 'behavior'
+            behavior_dict[name] = np.asarray(behavior_ts)
+            
+    else:
+        # Single time series (array-like)
+        name = behavior_names if isinstance(behavior_names, str) else 'behavior'
+        behavior_dict[name] = np.asarray(behavior_ts)
+    
+    # Validate all behavior time series are non-empty
+    for name, ts in behavior_dict.items():
+        if len(ts) == 0:
+            raise ValueError(f"Behavior time series '{name}' cannot be empty")
+    
+    # Find minimum length across all time series
+    all_lengths = [len(fr_ts)] + [len(ts) for ts in behavior_dict.values()]
+    min_session_len = min(all_lengths)
+    
+    # Check if time series is long enough for the model
+    min_required_length = max(ar_order, ma_order) + 1
+    if min_session_len < min_required_length:
+        raise ValueError(
+            f"Time series too short ({min_session_len} points) for "
+            f"specified model order (AR={ar_order}, MA={ma_order}). "
+            f"Need at least {min_required_length} points."
+        )
+    
+    # Align all time series
+    fr_ts_aligned = fr_ts[:min_session_len]
+    behavior_dict_aligned = {name: ts[:min_session_len] for name, ts in behavior_dict.items()}
+    
+    # Create DataFrames for the model
+    df_var_endo = pd.DataFrame({'fr': fr_ts_aligned})
+    df_var_exog = pd.DataFrame(behavior_dict_aligned)
+    
+    # ARIMA order specification (p, d, q)
+    arima_order = (ar_order, 0, ma_order)  # d=0 for ARMA
+    
+    # Fit ARIMA model
+    try:
+        model_ARMA = sm.tsa.arima.ARIMA(
+            endog=df_var_endo,
+            exog=df_var_exog,
+            order=arima_order,
+            trend=trend
+        )
+        results_ARMA = model_ARMA.fit()
+        
+    except Exception as e:
+        raise RuntimeError(f"Failed to fit ARMA model: {str(e)}")
+    
+    return results_ARMA
 
 
-def ARDL_model(fr_ts, behavior_ts, behavior_name, y_lag=5, x_order=0):
-    '''
-    fit ARDL model
-    '''
-    # make equal length
-    min_session_len = min(len(fr_ts), len(behavior_ts))
-    fr_ts = fr_ts[:min_session_len]
-    behavior_ts = behavior_ts[:min_session_len]
+def ARDL_model(
+    fr_ts: Union[List[float], np.ndarray, pd.Series],
+    behavior_ts: Union[List[Union[List[float], np.ndarray, pd.Series]], 
+                       Dict[str, Union[List[float], np.ndarray, pd.Series]]],
+    behavior_names: Optional[Union[str, List[str]]] = None,
+    y_lags: Union[int, List[int]] = 5,
+    x_order: Union[int, Dict[str, int]] = 0,
+    trend: str = 'ct'
+) -> object:
 
-    df_var_endo = pd.DataFrame({'fr': fr_ts})
-    df_var_exog = pd.DataFrame({behavior_name: behavior_ts})
-    X = df_var_exog
-
-    model_ARDL = ARDL(df_var_endo, lags=y_lag, exog=X, order=x_order)
-    results_ARDL = model_ARDL.fit()
-
+    """
+    Fit an Autoregressive Distributed Lag (ARDL) model to analyze the relationship
+    between a dependent variable (firing rate) and one or more exogenous variables (behaviors).
+    
+    The ARDL model captures both the autoregressive nature of the dependent variable
+    and the distributed lag effects of the exogenous variables, making it suitable
+    for analyzing dynamic relationships in time series data.
+    
+    Parameters
+    ----------
+    fr_ts : array-like
+        Time series of the dependent variable (e.g., firing rate).
+        Can be a list, numpy array, or pandas Series.
+    
+    behavior_ts : array-like or dict
+        Time series of exogenous variable(s). Can be:
+        - Single array-like for one behavior
+        - List of array-likes for multiple behaviors
+        - Dict mapping behavior names to array-likes
+    
+    behavior_names : str, list of str, or None, optional
+        Names of behavioral variables. Required if behavior_ts is a list.
+        If behavior_ts is a dict, this parameter is ignored.
+        If single behavior and str, uses that name.
+        If None and single behavior, defaults to 'behavior'.
+    
+    y_lags : int or list of int, default=5
+        Number of lags to include for the dependent variable.
+        If int, includes lags 1 to y_lags.
+        If list, includes specific lags (e.g., [1, 2, 5]).
+    
+    x_order : int or dict, default=0
+        Order of distributed lags for exogenous variables.
+        If int, applies the same order to all exogenous variables.
+        If dict, specifies order for each variable {behavior_name: order}.
+    
+    trend : {'n', 'c', 't', 'ct'}, default='ct'
+        Trend to include in the model:
+        - 'n': no trend
+        - 'c': constant only
+        - 't': time trend only
+        - 'ct': constant and time trend
+    
+    Returns
+    -------
+    results : ARDLResults
+        Fitted ARDL model results object containing parameter estimates,
+        statistics, and methods for further analysis.
+    
+    Raises
+    ------
+    ValueError
+        If input time series are empty or have incompatible lengths after alignment.
+        If behavior_names not provided when behavior_ts is a list.
+        If number of behavior names doesn't match number of behavior time series.
+    
+    Notes
+    -----
+    The function automatically aligns all time series to ensure equal length
+    by truncating to the shortest series. This prevents errors from mismatched
+    dimensions but may result in data loss if series lengths differ significantly.
+    
+    The ARDL(p, q1, q2, ..., qk) model with k exogenous variables is specified as:
+    y_t = c + δt + Σ(φ_i * y_{t-i}) + Σ(β1_j * x1_{t-j}) + ... + Σ(βk_j * xk_{t-j}) + ε_t
+    
+    where:
+    - p is the number of lags of the dependent variable (y_lags)
+    - q1, ..., qk are the orders of distributed lags for each exogenous variable
+    
+    Examples
+    --------
+    >>> import numpy as np
+    >>> # Generate sample data
+    >>> np.random.seed(42)
+    >>> fr_data = np.cumsum(np.random.randn(100)) + 50
+    >>> velocity_data = np.cumsum(np.random.randn(100)) + 10
+    >>> acceleration_data = np.diff(np.concatenate([[0], velocity_data]))
+    >>> 
+    >>> # Example 1: Single behavior
+    >>> results = ARDL_model(
+    ...     fr_data, 
+    ...     velocity_data, 
+    ...     'velocity',
+    ...     y_lags=3,
+    ...     x_order=2
+    ... )
+    >>> 
+    >>> # Example 2: Multiple behaviors with list
+    >>> results = ARDL_model(
+    ...     fr_data,
+    ...     [velocity_data, acceleration_data],
+    ...     ['velocity', 'acceleration'],
+    ...     y_lags=3,
+    ...     x_order={'velocity': 2, 'acceleration': 1}
+    ... )
+    >>> 
+    >>> # Example 3: Multiple behaviors with dict
+    >>> results = ARDL_model(
+    ...     fr_data,
+    ...     {'velocity': velocity_data, 'acceleration': acceleration_data},
+    ...     y_lags=3,
+    ...     x_order=2  # Same order for all
+    ... )
+    """
+    
+    # Input validation
+    if len(fr_ts) == 0:
+        raise ValueError("Firing rate time series cannot be empty")
+    
+    # Convert fr_ts to numpy array
+    fr_ts = np.asarray(fr_ts)
+    
+    # Handle different behavior_ts input formats
+    behavior_dict = {}
+    
+    if isinstance(behavior_ts, dict):
+        # Already in dict format
+        behavior_dict = {k: np.asarray(v) for k, v in behavior_ts.items()}
+        
+    elif isinstance(behavior_ts, list) and len(behavior_ts) > 0:
+        # Check if it's a list of time series or a single time series
+        if isinstance(behavior_ts[0], (list, np.ndarray, pd.Series)):
+            # List of multiple behaviors
+            if behavior_names is None:
+                raise ValueError("behavior_names must be provided when behavior_ts is a list of arrays")
+            
+            if isinstance(behavior_names, str):
+                behavior_names = [behavior_names]
+                
+            if len(behavior_names) != len(behavior_ts):
+                raise ValueError(f"Number of behavior names ({len(behavior_names)}) must match "
+                               f"number of behavior time series ({len(behavior_ts)})")
+            
+            for name, ts in zip(behavior_names, behavior_ts):
+                behavior_dict[name] = np.asarray(ts)
+        else:
+            # Single time series as list
+            name = behavior_names if isinstance(behavior_names, str) else 'behavior'
+            behavior_dict[name] = np.asarray(behavior_ts)
+            
+    else:
+        # Single time series (array-like)
+        name = behavior_names if isinstance(behavior_names, str) else 'behavior'
+        behavior_dict[name] = np.asarray(behavior_ts)
+    
+    # Validate all behavior time series are non-empty
+    for name, ts in behavior_dict.items():
+        if len(ts) == 0:
+            raise ValueError(f"Behavior time series '{name}' cannot be empty")
+    
+    # Find minimum length across all time series
+    all_lengths = [len(fr_ts)] + [len(ts) for ts in behavior_dict.values()]
+    min_session_len = min(all_lengths)
+    
+    if min_session_len < y_lags + 1:
+        raise ValueError(
+            f"Time series too short ({min_session_len} points) for "
+            f"specified lag order ({y_lags} lags)"
+        )
+    
+    # Align all time series
+    fr_ts_aligned = fr_ts[:min_session_len]
+    behavior_dict_aligned = {name: ts[:min_session_len] for name, ts in behavior_dict.items()}
+    
+    # Create DataFrames for the model
+    df_var_endo = pd.DataFrame({'fr': fr_ts_aligned})
+    df_var_exog = pd.DataFrame(behavior_dict_aligned)
+    
+    # Handle x_order parameter
+    if isinstance(x_order, int):
+        # Same order for all exogenous variables
+        order_param = x_order
+    else:
+        # Dictionary specifying order per variable
+        # Validate that all behavior names are in x_order
+        missing_vars = set(behavior_dict.keys()) - set(x_order.keys())
+        if missing_vars:
+            raise ValueError(f"x_order dict missing specifications for: {missing_vars}")
+        order_param = x_order
+    
+    # Fit ARDL model
+    try:
+        model_ARDL = ARDL(
+            endog=df_var_endo,
+            lags=y_lags,
+            exog=df_var_exog,
+            order=order_param,
+            trend=trend
+        )
+        results_ARDL = model_ARDL.fit()
+        
+    except Exception as e:
+        raise RuntimeError(f"Failed to fit ARDL model: {str(e)}")
+    
     return results_ARDL
-
