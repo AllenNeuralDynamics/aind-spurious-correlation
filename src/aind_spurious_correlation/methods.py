@@ -12,62 +12,200 @@ from typing import Union, List, Tuple, Dict, Optional
 
 
 def simple_LR(
-    fr_ts, 
-    behavior_ts, 
-    behavior_name
-):
+    fr_ts: Union[List[float], np.ndarray, pd.Series],
+    behavior_ts: Union[List[Union[List[float], np.ndarray, pd.Series]], 
+                       Dict[str, Union[List[float], np.ndarray, pd.Series]]],
+    behavior_names: Optional[Union[str, List[str]]] = None,
+    add_constant: bool = True
+) -> object:
     """
-    Fits a simple linear regression model between neural firing rates 
-    and a behavioral variable.
+    Fit a linear regression model between neural firing rates and one or more 
+    behavioral variables.
     
-    This function performs the following steps:
-    1. Truncates time series to equal lengths
-    2. Creates a pandas DataFrame with the variables
-    3. Removes any NA values
-    4. Fits an Ordinary Least Squares regression model
+    This function performs ordinary least squares (OLS) regression to analyze
+    the linear relationship between neural activity and behavioral predictors.
+    It handles multiple predictors and missing data.
     
     Parameters
     ----------
     fr_ts : array-like
-        Time series of neural firing rates
-    behavior_ts : array-like
-        Time series of behavioral variable to correlate with firing rates
-    behavior_name : str
-        Name of the behavioral variable (used for DataFrame column)
-        
+        Time series of neural firing rates (dependent variable).
+        Can be a list, numpy array, or pandas Series.
+    
+    behavior_ts : array-like or dict
+        Time series of predictor variable(s). Can be:
+        - Single array-like for one behavior
+        - List of array-likes for multiple behaviors
+        - Dict mapping behavior names to array-likes
+    
+    behavior_names : str, list of str, or None, optional
+        Names of behavioral variables. Required if behavior_ts is a list.
+        If behavior_ts is a dict, this parameter is ignored.
+        If single behavior and str, uses that name.
+        If None and single behavior, defaults to 'behavior'.
+    
+    add_constant : bool, default=True
+        Whether to add an intercept term to the model.
+        Set to False if data is already centered or intercept not needed.
+    
     Returns
     -------
-    statsmodels.regression.linear_model.RegressionResultsWrapper
+    results : RegressionResults
         Fitted OLS regression model results containing:
-        - coefficients
-        - standard errors
-        - t-statistics
-        - p-values
-        - R-squared
-        - other regression diagnostics
-        
+        - Coefficients and standard errors
+        - t-statistics and p-values
+        - R-squared and adjusted R-squared
+        - F-statistic and model diagnostics
+        - Residuals and fitted values
+    
+    Raises
+    ------
+    ValueError
+        If input time series are empty or all data is missing after NA removal.
+        If behavior_names not provided when behavior_ts is a list.
+        If number of behavior names doesn't match number of behavior time series.
+    
+    Notes
+    -----
+    Model Specification:
+    The linear regression model is:
+    y = β₀ + β₁X₁ + β₂X₂ + ... + βₖXₖ + ε
+    
+    where:
+    - y is the firing rate
+    - β₀ is the intercept (if add_constant=True)
+    - β₁, ..., βₖ are regression coefficients
+    - X₁, ..., Xₖ are behavioral predictors
+    - ε is the error term
+    
+    The function automatically:
+    - Aligns all time series to the shortest length
+    - Removes observations with any missing values
+    - Adds an intercept term by default
+    
+    For neural data, consider:
+    - Checking residual plots for heteroscedasticity
+    - Testing for multicollinearity with multiple predictors
+    
     Examples
     --------
-    >>> firing_rates = [1.2, 3.4, 2.1, 4.5]
-    >>> running_speed = [0.1, 0.3, 0.2, 0.4] 
-    >>> results = simple_LR(firing_rates, running_speed, 'speed')
-    >>> print(results.summary())
+    >>> import numpy as np
+    >>> # Generate sample data
+    >>> np.random.seed(42)
+    >>> n_samples = 100
+    >>> velocity = np.random.randn(n_samples)
+    >>> acceleration = np.diff(np.concatenate([[0], velocity]))
+    >>> fr_data = 5 + 2*velocity + 1.5*acceleration + np.random.randn(n_samples)
+    >>> 
+    >>> # Example 1: Single predictor
+    >>> results = fit_linear_regression(
+    ...     fr_data, 
+    ...     velocity, 
+    ...     'velocity'
+    ... )
+    >>> print(f"Velocity coefficient: {results.params['velocity']:.3f}")
+    >>> 
+    >>> # Example 2: Multiple predictors with list
+    >>> results = fit_linear_regression(
+    ...     fr_data,
+    ...     [velocity, acceleration],
+    ...     ['velocity', 'acceleration']
+    ... )
+    >>> 
+    >>> # Example 3: Multiple predictors with dict
+    >>> results = fit_linear_regression(
+    ...     fr_data,
+    ...     {'velocity': velocity, 'acceleration': acceleration},
+    ... )
+    
+    See Also
+    --------
+    statsmodels.api.OLS : Underlying OLS implementation
     """
-
-    # make equal length
-    min_session_len = min(len(fr_ts), len(behavior_ts))
-    fr_ts = fr_ts[:min_session_len]
-    behavior_ts = behavior_ts[:min_session_len]
     
-    df_var = pd.DataFrame({'fr': fr_ts,
-                          behavior_name: behavior_ts})
-    df_var = df_var.dropna()
+    # Input validation
+    if len(fr_ts) == 0:
+        raise ValueError("Firing rate time series cannot be empty")
     
-    df_var_endo = df_var['fr']
-    df_var_exog = df_var[behavior_name]
-    X = sm.add_constant(df_var_exog)
-    model_OLS = sm.OLS(df_var_endo, X)
-    results_OLS = model_OLS.fit()
+    # Convert fr_ts to numpy array
+    fr_ts = np.asarray(fr_ts)
+    
+    # Handle different behavior_ts input formats
+    behavior_dict = {}
+    
+    if isinstance(behavior_ts, dict):
+        # Already in dict format
+        behavior_dict = {k: np.asarray(v) for k, v in behavior_ts.items()}
+        
+    elif isinstance(behavior_ts, list) and len(behavior_ts) > 0:
+        # Check if it's a list of time series or a single time series
+        if isinstance(behavior_ts[0], (list, np.ndarray, pd.Series)):
+            # List of multiple behaviors
+            if behavior_names is None:
+                raise ValueError("behavior_names must be provided when behavior_ts is a list of arrays")
+            
+            if isinstance(behavior_names, str):
+                behavior_names = [behavior_names]
+                
+            if len(behavior_names) != len(behavior_ts):
+                raise ValueError(f"Number of behavior names ({len(behavior_names)}) must match "
+                               f"number of behavior time series ({len(behavior_ts)})")
+            
+            for name, ts in zip(behavior_names, behavior_ts):
+                behavior_dict[name] = np.asarray(ts)
+        else:
+            # Single time series as list
+            name = behavior_names if isinstance(behavior_names, str) else 'behavior'
+            behavior_dict[name] = np.asarray(behavior_ts)
+            
+    else:
+        # Single time series (array-like)
+        name = behavior_names if isinstance(behavior_names, str) else 'behavior'
+        behavior_dict[name] = np.asarray(behavior_ts)
+    
+    # Validate all behavior time series are non-empty
+    for name, ts in behavior_dict.items():
+        if len(ts) == 0:
+            raise ValueError(f"Behavior time series '{name}' cannot be empty")
+    
+    # Find minimum length across all time series
+    all_lengths = [len(fr_ts)] + [len(ts) for ts in behavior_dict.values()]
+    min_session_len = min(all_lengths)
+    
+    # Align all time series
+    fr_ts_aligned = fr_ts[:min_session_len]
+    behavior_dict_aligned = {name: ts[:min_session_len] for name, ts in behavior_dict.items()}
+    
+    # Create DataFrame
+    df_data = pd.DataFrame({'fr': fr_ts_aligned})
+    for name, ts in behavior_dict_aligned.items():
+        df_data[name] = ts
+    
+    # Remove rows with any NA values
+    df_clean = df_data.dropna()
+    
+    if len(df_clean) == 0:
+        raise ValueError("No valid data remaining after removing NA values")
+    
+    if len(df_clean) < len(df_data):
+        n_removed = len(df_data) - len(df_clean)
+        warnings.warn(f"Removed {n_removed} observations due to missing values")
+    
+    # Prepare data for regression
+    y = df_clean['fr']
+    X = df_clean[list(behavior_dict.keys())]
+    
+    # Add constant if requested
+    if add_constant:
+        X = sm.add_constant(X)
+    
+    # Fit OLS model
+    try:
+        model_OLS = sm.OLS(y, X)
+        results_OLS = model_OLS.fit()
+            
+    except Exception as e:
+        raise RuntimeError(f"Failed to fit linear regression model: {str(e)}")
     
     return results_OLS
 
